@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "akiyama"
+version = "0.1.0"
+description = "Chronos v2: rebound-candidate research with point-in-time data and AI risk review"
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.31",
+  "pandas>=2.1",
+  "pyarrow>=14",
+  "duckdb>=1.0",
+  "pyyaml>=6",
+  "python-dotenv>=1.0",
+  "tzdata",  # Windows has no system tz database
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+akiyama = "akiyama.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

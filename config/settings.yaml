@@ -1,0 +1,34 @@
+# Paths are relative to the repository root unless absolute.
+data_dir: data
+
+jquants:
+  base_url: https://api.jquants.com/v2
+  # Minimum seconds between API calls (presigned-URL downloads are not throttled).
+  min_interval_sec: 0.6
+  max_retries: 5
+
+# Datasets synced by `akiyama sync-bulk` when --datasets is not given.
+default_datasets:
+  - calendar
+  - master
+  - prices
+  - topix
+  - indices
+  - fins_summary
+  - earnings_date
+  - margin_interest
+  - short_ratio
+  - investor_types
+
+# Assumed availability times (JST) for data whose source has no publish time.
+# These are deliberately conservative; every row records which basis was used.
+availability:
+  prices_close: "16:30"
+  index_close: "16:30"
+  master_time: "07:00"
+  pub_date_time: "23:59"
+  next_day_time: "23:59"
+
+td_docs:
+  # File types to download from /td/files (pdf, summaryPdf, xbrl).
+  types: [pdf, summaryPdf]
