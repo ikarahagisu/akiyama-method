@@ -8,9 +8,9 @@ if not exist .venv\Scripts\python.exe (
   exit /b 1
 )
 echo [1/4] J-Quants bulk files...
-.venv\Scripts\python -m akiyama sync-bulk
+.venv\Scripts\python -m akiyama -v sync-bulk
 echo [2/4] TDnet disclosure index...
-.venv\Scripts\python -m akiyama sync-td
+.venv\Scripts\python -m akiyama -v sync-td
 echo [3/4] Building tables...
 .venv\Scripts\python -m akiyama normalize
 echo [4/4] Status
