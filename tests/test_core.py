@@ -177,3 +177,52 @@ def test_sync_is_append_only_and_normalize_prefers_live(tmp_path):
     adj = con.execute("SELECT Date, AdjC FROM prices_adj ORDER BY Date").fetchall()
     # split factor 0.5 on 02-02 halves prices before 02-02
     assert [round(r[1], 2) for r in adj] == [500.0, 1000.0, 510.0]
+
+
+# ------------------------------------------------------------------ TDnet
+TD_HDR = "DiscNo,Code,Name,DiscDate,DiscTime,Title,DiscStatus,RevNo,DiscItems,Docs\n"
+
+
+def test_td_rolling_window_kept_and_bulk_refreshed_monthly(tmp_path):
+    from datetime import date
+
+    from akiyama.ingest import sync_td
+    from akiyama.normalize import normalize_td
+
+    state = {"bulk_version": "2026-11-12T17:00:00Z",
+             "bulk": TD_HDR + "1,81740,a,2021-11-13,15:00,old,,1,1,g\n2,81740,a,2026-11-12,15:00,x,,1,1,g\n"}
+    calls = {"bulk": 0}
+
+    def h(url, params):
+        if url.endswith("/td/bulk"):
+            calls["bulk"] += 1
+            return Resp(payload={"lastUpdated": state["bulk_version"], "url": "https://bucket.example.com/td"})
+        if url == "https://bucket.example.com/td":
+            return Resp(content=_csv_gz(state["bulk"]))
+        if url.endswith("/td/list"):
+            rows = [{"DiscNo": "3", "Code": "81740", "Name": "a", "DiscDate": params["date"], "DiscTime": "16:00",
+                     "Title": "new", "DiscStatus": None, "RevNo": "1", "DiscItems": ["1", "2"], "Docs": ["g"]}] \
+                if params["date"] == "2026-11-14" else []
+            return Resp(payload={"data": rows})
+        return Resp(404, {"message": "?"})
+
+    c, _ = make_client(h)
+    store = RawStore(tmp_path / "raw")
+    sync_td(c, store, today=date(2026, 11, 14))
+    # next day the provider window rolls: the 2021-11-13 row disappears from the bulk file
+    state["bulk_version"] = "2026-11-13T17:00:00Z"
+    state["bulk"] = TD_HDR + "2,81740,a,2026-11-12,15:00,x,,1,1,g\n"
+    sync_td(c, RawStore(tmp_path / "raw"), today=date(2026, 11, 15))
+    assert calls["bulk"] == 1  # not re-downloaded within the refresh interval
+
+    n = normalize_td(RawStore(tmp_path / "raw"), tmp_path / "norm", AVAIL)
+    df = pd.concat(pd.read_parquet(p) for p in (tmp_path / "norm" / "td").rglob("*.parquet"))
+    assert set(df["DiscNo"]) == {"1", "2", "3"} and n == 3
+    assert df.loc[df["DiscNo"] == "3", "DiscItems"].item() == "1;2"
+
+    # after the refresh interval a new bulk copy is stored, and old rows still survive
+    sync_td(c, RawStore(tmp_path / "raw"), today=date(2026, 12, 12))
+    assert calls["bulk"] == 2
+    normalize_td(RawStore(tmp_path / "raw"), tmp_path / "norm", AVAIL)
+    df = pd.concat(pd.read_parquet(p) for p in (tmp_path / "norm" / "td").rglob("*.parquet"))
+    assert "1" in set(df["DiscNo"])

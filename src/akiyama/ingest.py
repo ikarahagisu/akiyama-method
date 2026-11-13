@@ -105,26 +105,44 @@ def sync_bulk(
     return reports
 
 
-def sync_td(client: JQuantsClient, store: RawStore, today: date | None = None) -> SyncReport:
-    """TDnet index: the 5-year bulk file plus per-day /td/list for days after it."""
-    rep = SyncReport()
-    info = client.td_bulk()
-    version = info.get("lastUpdated", "unversioned")
-    if _store_download(client, store, "td_bulk", "tdnet-disclosures-5years", version, lambda: info["url"], ".csv.gz"):
-        rep.downloaded.append(f"td_bulk@{version}")
-    else:
-        rep.skipped += 1
+def _version_date(version: str) -> date | None:
+    try:
+        return datetime.fromisoformat(version.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
 
-    # Days from the bulk file's update date through today, refreshed each run.
-    # Start one day before the bulk update date so late-evening JST disclosures are not missed.
-    start = (
-        datetime.fromisoformat(version.replace("Z", "+00:00")).date() - timedelta(days=1)
-        if version != "unversioned"
-        else None
-    )
+
+def sync_td(
+    client: JQuantsClient, store: RawStore, today: date | None = None, bulk_refresh_days: int = 28
+) -> SyncReport:
+    """TDnet index.
+
+    The 5-year bulk file is a rolling window, so its old copies are kept and all of
+    them are merged at normalisation. To avoid storing ~27 MB every day, a new bulk
+    copy is taken only when none is stored or the newest is ``bulk_refresh_days`` old;
+    days in between come from per-day ``/td/list`` calls.
+    """
+    rep = SyncReport()
     today = today or datetime.now(timezone(timedelta(hours=9))).date()
-    if start is None:
+    stored = [e for e in store.entries() if e.kind == "td_bulk" and (store.root / e.path).exists()]
+    newest = max((d for d in (_version_date(e.version) for e in stored) if d), default=None)
+    if newest is None or (today - newest).days >= bulk_refresh_days:
+        info = client.td_bulk()
+        version = info.get("lastUpdated", "unversioned")
+        if _store_download(client, store, "td_bulk", "tdnet-disclosures-5years", version, lambda: info["url"], ".csv.gz"):
+            rep.downloaded.append(f"td_bulk@{version}")
+            newest = _version_date(version) or newest
+        else:
+            rep.skipped += 1
+    if newest is None:
         return rep
+
+    # Start one day before the bulk copy (late-evening JST disclosures), or re-check the
+    # last two days already fetched by td_list (late additions/corrections).
+    start = newest - timedelta(days=1)
+    days_done = [date.fromisoformat(k) for k in store.latest("td_list")]
+    if days_done:
+        start = max(start, max(days_done) - timedelta(days=2))
     d = start
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     while d <= today:

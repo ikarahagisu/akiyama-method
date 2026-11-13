@@ -154,11 +154,22 @@ def normalize_bulk(store: RawStore, norm_dir: Path, name: str, settings_avail: d
 def normalize_td(store: RawStore, norm_dir: Path, settings_avail: dict[str, str]) -> int:
     ds = TD_DATASET
     frames = []
-    bulk = store.latest("td_bulk").get("tdnet-disclosures-5years")
-    if bulk:
-        df = _read_csv(store.root / bulk.path, ds)
-        df["src_key"], df["src_version"] = "td_bulk", bulk.version
+    # every stored copy of the rolling 5-year file, oldest first, so disclosures that
+    # have left the provider's window are kept
+    bulks = sorted(
+        (e for e in store.entries() if e.kind == "td_bulk" and (store.root / e.path).exists()),
+        key=lambda e: version_slug(e.version),
+    )
+    seen = set()
+    for e in bulks:
+        if e.version in seen:
+            continue
+        seen.add(e.version)
+        df = _read_csv(store.root / e.path, ds)
+        df["src_key"], df["src_version"] = "td_bulk", e.version
         frames.append(df)
+        if len(frames) > 1:  # keep memory flat
+            frames = [pd.concat(frames, ignore_index=True).drop_duplicates(subset=list(ds.key_cols), keep="last")]
     for day, e in sorted(store.latest("td_list").items()):
         with gzip.open(store.root / e.path, "rt", encoding="utf-8") as f:
             rows = json.load(f)
