@@ -116,6 +116,38 @@ def cmd_status(args, settings) -> int:
     return 0
 
 
+def cmd_universe(args, settings) -> int:
+    from .store import connect
+    from .universe import compute_universe, write_universe
+
+    con = connect(settings.norm_dir)
+    df = compute_universe(con, args.date_from, args.date_to)
+    paths = write_universe(df, settings.data_dir / "derived" / "universe")
+    daily = df.groupby("Date")["eligible"].sum()
+    print(f"universe rows={len(df):,} days={daily.size} eligible/day median={int(daily.median())} "
+          f"min={int(daily.min())} max={int(daily.max())} -> {len(paths)} files")
+    return 0
+
+
+def cmd_roster(args, settings) -> int:
+    from .config import REPO_ROOT
+    from .store import connect
+    from .universe import LEGACY_DEV_CODES, Criteria, compute_universe, make_meta, save_roster, stratified_roster
+
+    con = connect(settings.norm_dir)
+    day = compute_universe(con, args.asof, args.asof)
+    if day.empty:
+        print(f"no price rows on {args.asof} (not a trading day or data missing)", file=sys.stderr)
+        return 2
+    roster, strata = stratified_roster(day, args.n, args.seed, LEGACY_DEV_CODES)
+    meta = make_meta(args.name, args.asof, args.n, args.seed, Criteria(), LEGACY_DEV_CODES,
+                     int(day["eligible"].sum()), strata, args.note or "")
+    path = save_roster(roster, meta, REPO_ROOT / "rosters")
+    print(f"eligible on {args.asof}: {meta.eligible_count}; sampled {len(roster)} -> {path}")
+    print(roster.groupby("S17Nm").size().to_string())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="akiyama")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -143,6 +175,19 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("daily", help="sync-bulk + sync-td + normalize")
     s.add_argument("--since", help="YYYY-MM to limit bulk listing (e.g. current month)")
     s.set_defaults(fn=cmd_daily)
+
+    s = sub.add_parser("universe", help="compute point-in-time eligibility for a date range")
+    s.add_argument("--from", dest="date_from", required=True)
+    s.add_argument("--to", dest="date_to", required=True)
+    s.set_defaults(fn=cmd_universe)
+
+    s = sub.add_parser("roster", help="freeze a fixed-seed stratified sample of eligible companies")
+    s.add_argument("--name", required=True, help="file name under rosters/ (never overwritten)")
+    s.add_argument("--asof", required=True, help="trading day YYYY-MM-DD")
+    s.add_argument("--n", type=int, default=120)
+    s.add_argument("--seed", type=int, required=True)
+    s.add_argument("--note")
+    s.set_defaults(fn=cmd_roster)
 
     s = sub.add_parser("status", help="show stored raw files and table coverage")
     s.set_defaults(fn=cmd_status)
