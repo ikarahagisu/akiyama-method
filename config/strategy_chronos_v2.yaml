@@ -1,0 +1,28 @@
+# chronos_v2 candidate rule, fixed before looking at any results (2026-11-14).
+# Do not edit: changes go into a new file / version and are compared against this one.
+name: chronos_v2
+version: 1
+decision_time: "18:00"          # JST, after the close; entry at next open
+price_condition:
+  ret60_max: -0.10              # 60-trading-day return <= -10%
+  ret20_max: 0.0                # and last 20 trading days also down (< 0)
+chronos:
+  model: amazon/chronos-2
+  revision: 29ec3766d36d6f73f0696f85560a422f50e8498c   # HF lastModified 2026-06-05
+  context: 512                  # trading days of split-adjusted close
+  min_history: 120
+  horizon: 20                   # forecast trading days ahead
+  quantiles: [0.1, 0.5, 0.9]
+  batch_size: 256
+c0:
+  cost: 0.002                   # round-trip cost threshold on forecast return
+  ref: weekly                   # reference forecasts: last trading day of each week
+  ref_count: 52                 # past reference forecasts used
+  ref_min: 20
+  ref_pct: 0.75
+holding:
+  days: 20                      # exit at the open 20 trading days after entry
+periods:
+  dev_until: "2021-10-31"       # development period; final evaluation from 2021-11
+  chronos_release: "2025-10-30" # model first published
+  chronos_revision_date: "2026-06-05"

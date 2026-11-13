@@ -116,16 +116,109 @@ def cmd_status(args, settings) -> int:
     return 0
 
 
+def _derived(settings, name):
+    return settings.data_dir / "derived" / name
+
+
+def _year_chunks(date_from: str, date_to: str):
+    """Split a date range by calendar year to keep memory flat on long ranges."""
+    for y in range(int(date_from[:4]), int(date_to[:4]) + 1):
+        lo = max(date_from, f"{y}-01-01")
+        hi = min(date_to, f"{y}-12-31")
+        if lo <= hi:
+            yield lo, hi
+
+
 def cmd_universe(args, settings) -> int:
+    from .derived import upsert_partitioned
     from .store import connect
-    from .universe import compute_universe, write_universe
+    from .universe import compute_universe
 
     con = connect(settings.norm_dir)
-    df = compute_universe(con, args.date_from, args.date_to)
-    paths = write_universe(df, settings.data_dir / "derived" / "universe")
-    daily = df.groupby("Date")["eligible"].sum()
-    print(f"universe rows={len(df):,} days={daily.size} eligible/day median={int(daily.median())} "
-          f"min={int(daily.min())} max={int(daily.max())} -> {len(paths)} files")
+    for lo, hi in _year_chunks(args.date_from, args.date_to):
+        df = compute_universe(con, lo, hi)
+        if df.empty:
+            continue
+        upsert_partitioned(df, _derived(settings, "universe"), lo, hi)
+        daily = df.groupby("Date")["eligible"].sum()
+        print(f"universe {lo}..{hi} rows={len(df):,} eligible/day median={int(daily.median())} "
+              f"min={int(daily.min())} max={int(daily.max())}")
+    return 0
+
+
+def cmd_signals(args, settings) -> int:
+    from .derived import load_strategy, upsert_partitioned
+    from .signals import compute_signals
+    from .store import connect
+
+    con = connect(settings.norm_dir)
+    strategy = load_strategy()
+    for lo, hi in _year_chunks(args.date_from, args.date_to):
+        df = compute_signals(con, strategy, lo, hi)
+        if df.empty:
+            continue
+        upsert_partitioned(df, _derived(settings, "signals"), lo, hi)
+        print(f"signals {lo}..{hi} rows={len(df):,} price-condition days={int(df['cond_price'].sum()):,}")
+    return 0
+
+
+def _ref_days(con) -> set[str]:
+    from .signals import week_end_days
+
+    days = [r[0] for r in con.execute("SELECT Date FROM calendar WHERE HolDiv = '1'").fetchall()]
+    return week_end_days(days)
+
+
+def cmd_forecast(args, settings) -> int:
+    from .derived import load_strategy
+    from .forecast import chronos_predictor, model_tag, run_forecasts
+    from .signals import forecast_tasks
+    from .store import connect
+
+    strategy = load_strategy()
+    con = connect(settings.norm_dir)
+    sig = con.execute(
+        "SELECT Date, Code, eligible, cond_price FROM signals WHERE Date BETWEEN ? AND ?", [args.date_from, args.date_to]
+    ).df()
+    tasks = forecast_tasks(sig, _ref_days(con))
+    print(f"tasks: {len(tasks):,} ({tasks['kind'].value_counts().to_dict()})")
+    n = run_forecasts(con, tasks, strategy, _derived(settings, "forecasts") / model_tag(strategy),
+                      chronos_predictor(strategy), limit=args.limit)
+    print(f"new forecasts: {n:,}")
+    return 0
+
+
+def cmd_candidates(args, settings) -> int:
+    import duckdb
+
+    from .candidates import annotate, c0_flags
+    from .derived import load_strategy, upsert_partitioned
+    from .forecast import model_tag
+    from .store import connect
+
+    strategy = load_strategy()
+    con = connect(settings.norm_dir)
+    cands = con.execute(
+        "SELECT * FROM signals WHERE cond_price AND Date BETWEEN ? AND ?", [args.date_from, args.date_to]
+    ).df()
+    cache = _derived(settings, "forecasts") / model_tag(strategy)
+    if not any(cache.glob("part-*.parquet")):
+        print("no forecasts yet; run `forecast` first", file=sys.stderr)
+        return 2
+    fc = duckdb.sql(f"SELECT * FROM read_parquet('{(cache / 'part-*.parquet').as_posix()}')").df()
+    out = annotate(c0_flags(cands, fc, _ref_days(con), strategy), strategy)
+    upsert_partitioned(out, _derived(settings, "candidates"), args.date_from, args.date_to)
+    print(f"price-condition days={len(out):,}  c0 pass={int(out['c0'].sum()):,}  "
+          f"status={out['c0_status'].value_counts().to_dict()}")
+    return 0
+
+
+def cmd_pipeline(args, settings) -> int:
+    """universe -> signals -> forecast -> candidates for a date range."""
+    for fn in (cmd_universe, cmd_signals, cmd_forecast, cmd_candidates):
+        rc = fn(args, settings)
+        if rc:
+            return rc
     return 0
 
 
@@ -181,6 +274,18 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--to", dest="date_to", required=True)
     s.set_defaults(fn=cmd_universe)
 
+    for name, fn, hlp in (
+        ("signals", cmd_signals, "price condition for each eligible stock-day"),
+        ("forecast", cmd_forecast, "Chronos-2 forecasts for reference and candidate days (resumable)"),
+        ("candidates", cmd_candidates, "C0 check and candidate table"),
+        ("pipeline", cmd_pipeline, "universe + signals + forecast + candidates"),
+    ):
+        s = sub.add_parser(name, help=hlp)
+        s.add_argument("--from", dest="date_from", help="default: 40 days ago")
+        s.add_argument("--to", dest="date_to", help="default: today")
+        s.add_argument("--limit", type=int, help="forecast: stop after N new forecasts (testing)")
+        s.set_defaults(fn=fn)
+
     s = sub.add_parser("roster", help="freeze a fixed-seed stratified sample of eligible companies")
     s.add_argument("--name", required=True, help="file name under rosters/ (never overwritten)")
     s.add_argument("--asof", required=True, help="trading day YYYY-MM-DD")
@@ -195,6 +300,11 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(message)s")
     settings = load_settings(data_dir=args.data_dir)
+    if hasattr(args, "date_to") and args.cmd in ("universe", "signals", "forecast", "candidates", "pipeline"):
+        from datetime import date, timedelta
+
+        args.date_to = min(args.date_to or "9999-12-31", date.today().isoformat())
+        args.date_from = args.date_from or (date.today() - timedelta(days=40)).isoformat()
     return args.fn(args, settings)
 
 

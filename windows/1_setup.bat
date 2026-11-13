@@ -22,7 +22,7 @@ if not exist .venv\Scripts\python.exe (
 
 echo Installing packages (first time takes a few minutes)...
 .venv\Scripts\python -m pip install --upgrade pip
-.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\python -m pip install -e ".[dev,forecast]"
 if errorlevel 1 (
   echo [ERROR] Package install failed. See messages above.
   pause

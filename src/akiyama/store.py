@@ -35,4 +35,9 @@ def connect(norm_dir: Path, db_path: str = ":memory:") -> duckdb.DuckDBPyConnect
             FROM f
             """
         )
+    from .derived import register
+
+    derived = Path(norm_dir).parent / "derived"
+    for name in ("universe", "signals", "candidates"):
+        register(con, name, derived / name)
     return con

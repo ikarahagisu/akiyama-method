@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+forecast = ["chronos-forecasting==2.3.2"]
 
 [project.scripts]
 akiyama = "akiyama.cli:main"

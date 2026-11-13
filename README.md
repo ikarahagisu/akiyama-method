@@ -16,6 +16,21 @@
 | `python -m akiyama universe --from 2017-01-04 --to 2026-11-13` | 各営業日の適格銘柄（時点整合、`data/derived/universe/`） |
 | `python -m akiyama roster --name forward_120_20261113 --asof 2026-11-13 --n 120 --seed 20261113` | 適格銘柄から業種×規模で層化した固定乱数名簿を `rosters/` に凍結（上書き不可） |
 
+| `python -m akiyama pipeline --from 2016-11-01` | 適格判定→価格条件→Chronos-2予測→C0判定を一括実行（予測はキャッシュ・再開可能） |
+
+## 候補抽出 chronos_v2（P3）
+
+定義は `config/strategy_chronos_v2.yaml` に固定（結果を見る前に決定。変更は別版で比較）。
+
+| 段階 | 内容 |
+|---|---|
+| 価格条件 | 適格、かつ60営業日騰落率 ≤ −10%、かつ直近20営業日も下落（分割調整済み終値） |
+| Chronos-2 | `amazon/chronos-2`（revision固定）、直近512営業日の調整後終値から20営業日先を予測 |
+| C0 | 予測リターン（中央値）> max(0.2%, その銘柄の過去52回の週末予測の75%点)。参照は判定日より前のみ、最低20回 |
+| 出力 | `data/derived/candidates/`：価格条件成立日すべてに `c0`・`c0_status`・`period`（dev/eval）・`chronos_period`・`is_dev_code` |
+
+Chronos-2は2025-10公開（現revisionの更新は2026-06）。それ以前の期間ではモデルが学習時に見た可能性があるため、Chronosの追加価値は `chronos_period` 別に評価する。
+
 ## 適格条件（P2）
 
 判定日Dの18:00（JST）時点で利用可能なデータのみ使用。
