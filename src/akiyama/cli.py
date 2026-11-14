@@ -288,6 +288,30 @@ def _print_backtest(res, cs) -> None:
                   f"{pct(lo.get('cumulative'))}..{pct(hi.get('cumulative'))})")
 
 
+def cmd_diagnose(args, settings) -> int:
+    from pathlib import Path
+
+    from .diagnose import add_features, bucket_tables, latest_run
+    from .store import connect
+
+    run = Path(args.run) if args.run else latest_run(_derived(settings, "backtest"))
+    con = connect(settings.norm_dir)
+    co = pd.read_parquet(run / "candidate_outcomes.parquet")
+    print(f"run: {run}  candidates: {len(co):,}; adding features...")
+    feats = add_features(con, co)
+    tab = bucket_tables(feats)
+    out = run / "diagnostics.csv"
+    tab.to_csv(out, index=False, encoding="utf-8-sig")
+    show = tab[(tab["c0_group"] == "all") & tab["feature"].isin(["breadth", "vol60", "streak", "excess20", "topix_r20", "close"])]
+    pd.set_option("display.width", 200)
+    for f, g in show.groupby("feature", sort=False):
+        print(f"\n== {f}")
+        print(g[["period", "bucket", "n", "days", "mean", "day_mean", "win", "mae10"]]
+              .to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+    print(f"\nsaved -> {out}  (send this CSV for analysis)")
+    return 0
+
+
 def cmd_pipeline(args, settings) -> int:
     """universe -> signals -> forecast -> candidates for a date range."""
     for fn in (cmd_universe, cmd_signals, cmd_forecast, cmd_candidates):
@@ -365,6 +389,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--seeds", type=int, default=20, help="random-ranking repetitions")
     s.add_argument("--include-dev-codes", action="store_true", help="keep the 8 legacy development stocks")
     s.set_defaults(fn=cmd_backtest)
+
+    s = sub.add_parser("diagnose", help="bucketed diagnostics of the latest backtest run")
+    s.add_argument("--run", help="backtest run directory (default: latest)")
+    s.set_defaults(fn=cmd_diagnose)
 
     s = sub.add_parser("roster", help="freeze a fixed-seed stratified sample of eligible companies")
     s.add_argument("--name", required=True, help="file name under rosters/ (never overwritten)")
