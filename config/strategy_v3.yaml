@@ -1,0 +1,17 @@
+# chronos_v3 filters on top of the chronos_v2 price condition (fixed 2026-11-14).
+# Thresholds are dev-period quintile edges from the 20261114 diagnostics, rounded.
+# NOTE: those diagnostics also showed eval-period results, so the eval period is no
+# longer blind for these features. Forward (paper) operation is the confirmatory test.
+name: chronos_v3
+version: 1
+base: chronos_v2
+market:                 # v3a: buy only when the decline is market-wide (either condition)
+  breadth_min: 0.20     # share of eligible stocks meeting the price condition that day
+  topix_r20_max: -0.03  # or TOPIX 20-day return <= -3%
+risk:                   # v3b: additionally drop the riskiest quintiles (dev edges)
+  vol60_max: 0.034      # daily log-return std over 60 days
+  pbr_max: 3.9          # PBR missing (e.g. negative equity) is excluded
+  mktcap_min_mil: 28000 # 280億円
+sizings:                # account variants
+  - {name: 3x100, slots: 3, max_per_position: 1000000}
+  - {name: 10x30, slots: 10, max_per_position: 300000}

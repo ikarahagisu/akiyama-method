@@ -279,6 +279,36 @@ def run_all(cands: pd.DataFrame, pb: PriceBook, trading_days: list[str], periods
     return results
 
 
+def run_sets(sets: dict[str, tuple[pd.DataFrame, tuple[str, ...]]], pb: PriceBook, trading_days: list[str],
+             periods: dict[str, tuple[str, str]], sizings: list[dict], seeds: int = 20, c0_cost: float = 0.002,
+             hold_days: int = 20, progress=print) -> dict:
+    """Like run_all, for arbitrary candidate sets and account sizings.
+
+    sets: name -> (candidates, rankings). Keys of the result: period|set@sizing|ranking.
+    """
+    results = {}
+    for sz in sizings:
+        rules = AccountRules(slots=sz["slots"], max_per_position=sz["max_per_position"], hold_days=hold_days)
+        for pname, (lo, hi) in periods.items():
+            days = [d for d in trading_days if lo <= d <= hi]
+            for sname, (cands, rankings) in sets.items():
+                c = cands.assign(Code=cands["Code"].astype(str), Date=cands["Date"].astype(str), c0_cost=c0_cost)
+                c = c[(c["Date"] >= lo) & (c["Date"] <= hi)]
+                for r in rankings:
+                    runs = range(seeds) if r == "R" else [0]
+                    sims = [simulate(c, pb, days, rules, r, seed=k) for k in runs]
+                    key = f"{pname}|{sname}@{sz['name']}|{r}"
+                    if r == "R":
+                        df = pd.DataFrame([x.summary for x in sims])
+                        num = df.select_dtypes("number")
+                        results[key] = {"median": num.median().to_dict(), "p10": num.quantile(0.1).to_dict(),
+                                        "p90": num.quantile(0.9).to_dict(), "seeds": seeds}
+                    else:
+                        results[key] = {"summary": sims[0].summary, "trades": sims[0].trades, "equity": sims[0].equity}
+                    progress(f"  done {key}")
+    return results
+
+
 def save_results(results: dict, cand_table: pd.DataFrame, cand_summary: pd.DataFrame, out_dir: Path, meta: dict) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

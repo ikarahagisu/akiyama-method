@@ -312,6 +312,96 @@ def cmd_diagnose(args, settings) -> int:
     return 0
 
 
+def _int(x) -> int:
+    return 0 if x is None or pd.isna(x) else int(x)
+
+
+def cmd_backtest_v3(args, settings) -> int:
+    import json
+    from datetime import datetime
+
+    import yaml
+
+    from .backtest import AccountRules, candidate_outcomes, load_pricebook, run_sets
+    from .config import REPO_ROOT
+    from .derived import load_strategy
+    from .diagnose import add_features
+    from .store import connect
+    from .strategy_v3 import candidate_sets
+
+    v2 = load_strategy()
+    cfg = yaml.safe_load((REPO_ROOT / "config" / "strategy_v3.yaml").read_text(encoding="utf-8"))
+    con = connect(settings.norm_dir)
+    cands = con.execute("SELECT * FROM candidates").df()
+    cands = cands[~cands["is_dev_code"]]
+    print(f"candidates: {len(cands):,}; adding features...")
+    feats = add_features(con, cands)
+    last = con.execute("SELECT MAX(Date) FROM prices").fetchone()[0]
+    days = [r[0] for r in con.execute(
+        "SELECT Date FROM calendar WHERE HolDiv = '1' AND Date >= ? AND Date <= ? ORDER BY Date",
+        [feats["Date"].min(), last]).fetchall()]
+    pb = load_pricebook(con, feats["Code"].unique())
+    co = candidate_outcomes(feats, pb, AccountRules(hold_days=v2["holding"]["days"]))
+    sets = candidate_sets(co, cfg)
+
+    # candidate level per set
+    rows = []
+    for name, (df, _) in sets.items():
+        d = df[df["exit_reason"].isin(["scheduled", "no_price"])]
+        for per, g in d.groupby("period"):
+            daily = g.groupby("Date")["net"].mean()
+            rows.append({"set": name, "period": per, "n": len(g), "days": g["Date"].nunique(),
+                         "mean": g["net"].mean(), "day_mean": daily.mean(), "win": (g["net"] > 0).mean(),
+                         "mae10": (g["mae_low"] <= -0.10).mean()})
+    cand_tab = pd.DataFrame(rows)
+
+    per = v2["periods"]
+    periods = {"full": (feats["Date"].min(), last), "dev": (feats["Date"].min(), per["dev_until"]),
+               "eval": ("2021-11-01", last), "post_release": (per["chronos_release"], last)}
+    print(f"running account simulations ({len(cfg['sizings'])} sizings x {len(periods)} periods x {len(sets)} sets)...")
+    res = run_sets(sets, pb, days, periods, cfg["sizings"], seeds=args.seeds, c0_cost=v2["c0"]["cost"],
+                   hold_days=v2["holding"]["days"], progress=(print if args.verbose else (lambda m: None)))
+
+    out = _derived(settings, "backtest") / ("v3_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+    out.mkdir(parents=True, exist_ok=True)
+    acc = []
+    for key, r in res.items():
+        p, sname, rk = key.split("|")
+        if "summary" in r:
+            acc.append({"period": p, "set": sname, "ranking": rk, "stat": "value", **r["summary"]})
+            if len(r["trades"]):
+                r["trades"].to_csv(out / f"trades_{p}_{sname}_{rk}.csv".replace("@", "_"), index=False)
+        else:
+            for st in ("median", "p10", "p90"):
+                acc.append({"period": p, "set": sname, "ranking": rk, "stat": st, **r[st]})
+    acc = pd.DataFrame(acc)
+    acc.to_csv(out / "account_summary.csv", index=False)
+    cand_tab.to_csv(out / "candidate_sets.csv", index=False)
+    (out / "meta.json").write_text(json.dumps({"v3": cfg, "periods": periods, "seeds": args.seeds}, ensure_ascii=False,
+                                              indent=2, default=str), encoding="utf-8")
+
+    def pct(x):
+        return f"{x * 100:6.1f}%" if pd.notna(x) else "    - "
+
+    print("\n[candidate level by set] n / days / mean / day_mean / win / MAE<=-10%")
+    for _, r in cand_tab.sort_values(["period", "set"]).iterrows():
+        print(f"  {r['period']:5s} {r['set']:16s} n={int(r['n']):>8,d} days={int(r['days']):>5d} "
+              f"{pct(r['mean'])} {pct(r['day_mean'])} {pct(r['win'])} {pct(r['mae10'])}")
+    print("\n[account] cumulative / CAGR / maxDD / invested / trades / win / trades MAE<=-10%   (R = median of seeds, p10..p90)")
+    for _, r in acc[acc["stat"].isin(["value", "median"])].iterrows():
+        extra = ""
+        if r["stat"] == "median":
+            lo = acc[(acc["period"] == r["period"]) & (acc["set"] == r["set"]) & (acc["ranking"] == "R") & (acc["stat"] == "p10")]
+            hi = acc[(acc["period"] == r["period"]) & (acc["set"] == r["set"]) & (acc["ranking"] == "R") & (acc["stat"] == "p90")]
+            if len(lo) and len(hi) and "cumulative" in lo:
+                extra = f"  [{pct(lo['cumulative'].iloc[0])}..{pct(hi['cumulative'].iloc[0])}]"
+        print(f"  {r['period']:12s} {r['set']:22s} {r['ranking']}  {pct(r.get('cumulative'))} {pct(r.get('cagr'))} "
+              f"{pct(r.get('max_dd'))} {pct(r.get('mean_invested_ratio'))} {_int(r.get('trades')):>5d} "
+              f"{pct(r.get('win_rate'))} {_int(r.get('trade_mae10')):>4d}{extra}")
+    print(f"saved -> {out}")
+    return 0
+
+
 def cmd_pipeline(args, settings) -> int:
     """universe -> signals -> forecast -> candidates for a date range."""
     for fn in (cmd_universe, cmd_signals, cmd_forecast, cmd_candidates):
@@ -389,6 +479,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--seeds", type=int, default=20, help="random-ranking repetitions")
     s.add_argument("--include-dev-codes", action="store_true", help="keep the 8 legacy development stocks")
     s.set_defaults(fn=cmd_backtest)
+
+    s = sub.add_parser("backtest-v3", help="v3 market/risk filters vs v2, two account sizings")
+    s.add_argument("--seeds", type=int, default=20)
+    s.set_defaults(fn=cmd_backtest_v3)
 
     s = sub.add_parser("diagnose", help="bucketed diagnostics of the latest backtest run")
     s.add_argument("--run", help="backtest run directory (default: latest)")
