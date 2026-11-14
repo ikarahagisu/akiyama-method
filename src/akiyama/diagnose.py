@@ -95,11 +95,10 @@ def bucket_tables(df: pd.DataFrame, q: int = 5) -> pd.DataFrame:
         dev = d[d["c0_group"] == "all"]
     rows = []
     for f in FEATURES:
-        edges = _edges(dev[f], q)
+        # streak uses fixed edges (1 = first day of the episode)
+        edges = np.array([0, 1, 2, 5, 10, 20, np.inf]) if f == "streak" else _edges(dev[f], q)
         if len(edges) < 2:
             continue
-        if f == "streak":
-            edges = np.array([0, 1, 2, 5, 10, 20, np.inf])
         b = pd.cut(d[f], np.r_[-np.inf, edges[1:-1], np.inf], duplicates="drop")
         t = d.assign(bucket=b.astype(str)).groupby(["period", "c0_group", "bucket"], observed=True).apply(_stats, include_groups=False)
         rows.append(t.reset_index().assign(feature=f))
