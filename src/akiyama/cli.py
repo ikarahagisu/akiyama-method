@@ -463,6 +463,91 @@ def cmd_backtest_v3(args, settings, version: str = "v3") -> int:
 LEGACY8 = "3388,3923,6161,6941,7453,7545,7564,8174"
 
 
+def _topix_stats(con, lo: str, hi: str) -> dict:
+    import numpy as np
+
+    t = con.execute("SELECT Date, C FROM topix WHERE Date BETWEEN ? AND ? ORDER BY Date", [lo, hi]).df()
+    if len(t) < 2:
+        return {}
+    c = t["C"].to_numpy()
+    years = max((pd.Timestamp(t["Date"].iloc[-1]) - pd.Timestamp(t["Date"].iloc[0])).days / 365.25, 1e-9)
+    return {"cumulative": c[-1] / c[0] - 1, "cagr": (c[-1] / c[0]) ** (1 / years) - 1,
+            "max_dd": float((c / np.maximum.accumulate(c) - 1).min())}
+
+
+def cmd_backtest_gc_rsi(args, settings) -> int:
+    from datetime import datetime
+
+    from .backtest import AccountRules, load_pricebook
+    from .gc_rsi import GCParams, signals, simulate_trades, summarize, trades
+    from .store import connect
+
+    p = GCParams(tp=args.tp, sl=args.sl, max_days=args.max_days)
+    con = connect(settings.norm_dir)
+    elig = con.execute("SELECT Code, Date FROM universe WHERE eligible").df().astype(str)
+    con.register("_gc_codes", pd.DataFrame({"Code": elig["Code"].unique()}))
+    px = con.execute("SELECT Code, Date, AdjC FROM prices_adj WHERE Code IN (SELECT Code FROM _gc_codes) "
+                     "AND AdjC IS NOT NULL ORDER BY Code, Date").df()
+    px["Date"] = px["Date"].astype(str)
+    print(f"computing signals over {px['Code'].nunique():,} stocks ...")
+    sig = signals(px, elig, p)
+    del px
+    last = con.execute("SELECT MAX(Date) FROM prices").fetchone()[0]
+    first = sig["Date"].min() if len(sig) else last
+    days = [r[0] for r in con.execute("SELECT Date FROM calendar WHERE HolDiv = '1' AND Date >= ? AND Date <= ? ORDER BY Date",
+                                      [first, last]).fetchall()]
+    print(f"signals: {len(sig):,} on {sig['Date'].nunique() if len(sig) else 0:,} days; loading prices ...")
+    pb = load_pricebook(con, sig["Code"].unique())
+    periods = {"full": (first, last), "dev": (first, "2021-10-31"), "eval": ("2021-11-01", last)}
+    sizings = [{"name": "3x100", "slots": 3, "max_per_position": 1_000_000},
+               {"name": "10x30", "slots": 10, "max_per_position": 300_000}]
+    cand_rows, acc_rows = [], []
+    for mode in ("conservative", "optimistic"):
+        t = trades(sig, pb, p, mode)
+        for pname, (lo, hi) in periods.items():
+            sub = t[(t["Date"] >= lo) & (t["Date"] <= hi)]
+            cand_rows.append({"mode": mode, "period": pname, **summarize(sub)})
+            pdays = [d for d in days if lo <= d <= hi]
+            for sz in sizings:
+                rules = AccountRules(slots=sz["slots"], max_per_position=sz["max_per_position"])
+                sims = pd.DataFrame([simulate_trades(sub, pb, pdays, rules, seed=k) for k in range(args.seeds)])
+                acc_rows.append({"mode": mode, "period": pname, "sizing": sz["name"], "stat": "median", **sims.median().to_dict()})
+                acc_rows.append({"mode": mode, "period": pname, "sizing": sz["name"], "stat": "p10", **sims.quantile(0.1).to_dict()})
+                acc_rows.append({"mode": mode, "period": pname, "sizing": sz["name"], "stat": "p90", **sims.quantile(0.9).to_dict()})
+                if args.verbose:
+                    print(f"  done {mode} {pname} {sz['name']}")
+    cand, acc = pd.DataFrame(cand_rows), pd.DataFrame(acc_rows)
+    bench = pd.DataFrame([{"period": k, **_topix_stats(con, lo, hi)} for k, (lo, hi) in periods.items()])
+    out = _derived(settings, "backtest") / ("gc_rsi_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+    out.mkdir(parents=True, exist_ok=True)
+    cand.to_csv(out / "trade_summary.csv", index=False)
+    acc.to_csv(out / "account_summary.csv", index=False)
+    bench.to_csv(out / "topix.csv", index=False)
+
+    def pct(x):
+        return f"{x * 100:6.1f}%" if pd.notna(x) else "    - "
+
+    print(f"\n[trades] TP +{p.tp:.0%} / SL -{p.sl:.0%} / max {p.max_days} days, fee 0.10% per side")
+    print("  mode          period  n        mean    day_mean  win     TP      SL      gapSL   time    both-hit")
+    for _, r in cand.iterrows():
+        if not r.get("n"):
+            continue
+        print(f"  {r['mode']:13s} {r['period']:6s} {int(r['n']):>7,d} {pct(r['mean'])} {pct(r['day_mean'])} {pct(r['win'])} "
+              f"{pct(r['pct_tp'] + r['pct_gap_tp'])} {pct(r['pct_sl'])} {pct(r['pct_gap_sl'])} {pct(r['pct_time'])} {pct(r['both_hit'])}")
+    print("\n[account, random median] cumulative / CAGR / maxDD / invested / trades   [cumulative p10..p90]")
+    for _, r in acc[acc["stat"] == "median"].iterrows():
+        lo = acc[(acc["mode"] == r["mode"]) & (acc["period"] == r["period"]) & (acc["sizing"] == r["sizing"]) & (acc["stat"] == "p10")]
+        hi = acc[(acc["mode"] == r["mode"]) & (acc["period"] == r["period"]) & (acc["sizing"] == r["sizing"]) & (acc["stat"] == "p90")]
+        print(f"  {r['mode']:13s} {r['period']:6s} {r['sizing']:6s} {pct(r.get('cumulative'))} {pct(r.get('cagr'))} "
+              f"{pct(r.get('max_dd'))} {pct(r.get('invested'))} {_int(r.get('trades')):>5d}   "
+              f"[{pct(lo['cumulative'].iloc[0]) if 'cumulative' in lo else '-'}..{pct(hi['cumulative'].iloc[0]) if 'cumulative' in hi else '-'}]")
+    print("\n[TOPIX buy & hold, price index without dividends]")
+    for _, r in bench.iterrows():
+        print(f"  {r['period']:6s} {pct(r.get('cumulative'))} CAGR {pct(r.get('cagr'))} maxDD {pct(r.get('max_dd'))}")
+    print(f"saved -> {out}")
+    return 0
+
+
 def cmd_quality_profile(args, settings) -> int:
     """Quality features of the legacy 8 vs the universe, and dev-period outcome buckets.
 
@@ -595,6 +680,13 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("backtest-v4", help="v4 company-quality filter vs v2/v3 (evaluate once)")
     s.add_argument("--seeds", type=int, default=20)
     s.set_defaults(fn=cmd_backtest_v4)
+
+    s = sub.add_parser("backtest-gc-rsi", help="golden cross + RSI with take profit / stop loss")
+    s.add_argument("--tp", type=float, default=0.05)
+    s.add_argument("--sl", type=float, default=0.03)
+    s.add_argument("--max-days", type=int, default=20)
+    s.add_argument("--seeds", type=int, default=20)
+    s.set_defaults(fn=cmd_backtest_gc_rsi)
 
     s = sub.add_parser("quality-profile", help="quality features: legacy 8 vs universe, dev-period buckets")
     s.set_defaults(fn=cmd_quality_profile)
