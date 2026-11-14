@@ -86,7 +86,7 @@ def _stats(g: pd.DataFrame) -> pd.Series:
     })
 
 
-def bucket_tables(df: pd.DataFrame, q: int = 5) -> pd.DataFrame:
+def bucket_tables(df: pd.DataFrame, q: int = 5, features: list[str] | None = None, extras: bool = True) -> pd.DataFrame:
     d = df[df["exit_reason"].isin(["scheduled", "no_price"])].copy()
     d["c0_group"] = d["c0_status"].where(d["c0_status"].isin(["pass", "fail"]), "no_c0")
     d = pd.concat([d, d.assign(c0_group="all")], ignore_index=True)
@@ -94,7 +94,7 @@ def bucket_tables(df: pd.DataFrame, q: int = 5) -> pd.DataFrame:
     if dev.empty:  # e.g. a short test run: fall back to all rows
         dev = d[d["c0_group"] == "all"]
     rows = []
-    for f in FEATURES:
+    for f in (features or FEATURES):
         # streak uses fixed edges (1 = first day of the episode)
         edges = np.array([0, 1, 2, 5, 10, 20, np.inf]) if f == "streak" else _edges(dev[f], q)
         if len(edges) < 2:
@@ -102,6 +102,12 @@ def bucket_tables(df: pd.DataFrame, q: int = 5) -> pd.DataFrame:
         b = pd.cut(d[f], np.r_[-np.inf, edges[1:-1], np.inf], duplicates="drop")
         t = d.assign(bucket=b.astype(str)).groupby(["period", "c0_group", "bucket"], observed=True).apply(_stats, include_groups=False)
         rows.append(t.reset_index().assign(feature=f))
+    if not extras:
+        cols = ["feature", "period", "c0_group", "bucket", "n", "days", "mean", "median", "day_mean", "win", "mae10", "net_std"]
+        if not rows:
+            return pd.DataFrame(columns=cols)
+        out = pd.concat(rows, ignore_index=True)
+        return out[["feature", "period", "c0_group", "bucket", "n", "days", "mean", "median", "day_mean", "win", "mae10", "net_std"]]
     sec = d.groupby(["period", "c0_group", "S17Nm"], observed=True).apply(_stats, include_groups=False).reset_index()
     rows.append(sec.rename(columns={"S17Nm": "bucket"}).assign(feature="sector"))
     yr = d.assign(bucket=d["Date"].str[:4]).groupby(["period", "c0_group", "bucket"]).apply(_stats, include_groups=False)

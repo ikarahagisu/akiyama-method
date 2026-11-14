@@ -437,6 +437,54 @@ def cmd_backtest_v3(args, settings) -> int:
     return 0
 
 
+LEGACY8 = "3388,3923,6161,6941,7453,7545,7564,8174"
+
+
+def cmd_quality_profile(args, settings) -> int:
+    """Quality features of the legacy 8 vs the universe, and dev-period outcome buckets.
+
+    The evaluation period (2021-11 onward) outcomes are deliberately not shown.
+    """
+    from .derived import load_strategy
+    from .diagnose import bucket_tables, latest_run
+    from .quality import QUALITY_FEATURES, profile_table, quality_features
+    from .store import connect
+
+    v2 = load_strategy()
+    con = connect(settings.norm_dir)
+    legacy = _codes_candidates(con, v2, LEGACY8, ignore_eligibility=True)
+    legacy_codes = sorted(legacy["Code"].unique())
+    uni = con.execute("SELECT Code, Date FROM candidates").df()
+    keys = pd.concat([uni[["Code", "Date"]], legacy[["Code", "Date"]]]).astype(str).drop_duplicates()
+    print(f"computing quality features for {len(keys):,} stock-days ...")
+    feats = quality_features(con, keys)
+    out_dir = _derived(settings, "quality")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    feats.to_parquet(out_dir / "quality_features.parquet", index=False)
+
+    prof = profile_table(feats, legacy_codes)
+    prof.to_csv(out_dir / "quality_profile.csv", index=False, encoding="utf-8-sig")
+    pd.set_option("display.width", 250)
+    print("\n[profile] universe percentiles vs legacy 8 (median over their price-condition days)")
+    cols = ["feature", "uni_p10", "uni_p25", "uni_p50", "uni_p75", "uni_p90", "legacy8_median", "legacy8_pct_rank"] + legacy_codes
+    print(prof[cols].to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+
+    run = latest_run(_derived(settings, "backtest"))
+    co = pd.read_parquet(run / "candidate_outcomes.parquet")
+    co = co[(co["period"] == "dev") & ~co["Code"].astype(str).isin(legacy_codes)]
+    co = co.assign(Code=co["Code"].astype(str), Date=co["Date"].astype(str)).merge(feats, on=["Code", "Date"], how="left")
+    tab = bucket_tables(co, features=QUALITY_FEATURES, extras=False)
+    tab = tab[tab["period"] == "dev"]
+    tab.to_csv(out_dir / "quality_dev_buckets.csv", index=False, encoding="utf-8-sig")
+    print("\n[dev period only, legacy 8 excluded] outcomes by quality bucket (all candidates)")
+    show = tab[tab["c0_group"] == "all"]
+    for f, g in show.groupby("feature", sort=False):
+        print(f"\n== {f}")
+        print(g[["bucket", "n", "days", "mean", "day_mean", "win", "mae10"]].to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+    print(f"\nsaved -> {out_dir}  (send quality_profile.csv and quality_dev_buckets.csv)")
+    return 0
+
+
 def cmd_pipeline(args, settings) -> int:
     """universe -> signals -> forecast -> candidates for a date range."""
     for fn in (cmd_universe, cmd_signals, cmd_forecast, cmd_candidates):
@@ -520,6 +568,9 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--codes", help="restrict to these codes, e.g. 3388,8174 (legacy dev codes allowed)")
     s.add_argument("--ignore-eligibility", action="store_true", help="with --codes: do not require eligibility")
     s.set_defaults(fn=cmd_backtest_v3)
+
+    s = sub.add_parser("quality-profile", help="quality features: legacy 8 vs universe, dev-period buckets")
+    s.set_defaults(fn=cmd_quality_profile)
 
     s = sub.add_parser("diagnose", help="bucketed diagnostics of the latest backtest run")
     s.add_argument("--run", help="backtest run directory (default: latest)")
