@@ -316,6 +316,35 @@ def _int(x) -> int:
     return 0 if x is None or pd.isna(x) else int(x)
 
 
+def _codes_candidates(con, strategy: dict, codes_arg: str, ignore_eligibility: bool) -> pd.DataFrame:
+    """Price-condition days for specific stocks, optionally without the eligibility filter.
+
+    C0 columns come from the candidates table where they exist (eligible days only);
+    other days are 'no_c0'.
+    """
+    from .candidates import annotate
+    from .datasets import code5
+
+    codes = [code5(c) for c in codes_arg.split(",") if c.strip()]
+    pc = strategy["price_condition"]
+    con.register("_sel_codes", pd.DataFrame({"Code": codes}))
+    sig = con.execute(
+        f"SELECT * FROM signals WHERE Code IN (SELECT Code FROM _sel_codes) "
+        f"AND ret60 <= {pc['ret60_max']} AND ret20 < {pc['ret20_max']}"
+        + ("" if ignore_eligibility else " AND eligible")
+    ).df()
+    c0 = con.execute(
+        "SELECT Code, Date, c0, c0_status, r_hat, ref_p, q10, q50, q90 FROM candidates "
+        "WHERE Code IN (SELECT Code FROM _sel_codes)"
+    ).df()
+    df = sig.merge(c0, on=["Code", "Date"], how="left")
+    df["c0"] = df["c0"].fillna(False).astype(bool)
+    df["c0_status"] = df["c0_status"].fillna("no_c0")
+    df = annotate(df.assign(Date=df["Date"].astype(str)), strategy)
+    print(f"codes {codes}: price-condition days {len(df):,} (eligible {int(df['eligible'].sum()):,})")
+    return df
+
+
 def cmd_backtest_v3(args, settings) -> int:
     import json
     from datetime import datetime
@@ -332,8 +361,13 @@ def cmd_backtest_v3(args, settings) -> int:
     v2 = load_strategy()
     cfg = yaml.safe_load((REPO_ROOT / "config" / "strategy_v3.yaml").read_text(encoding="utf-8"))
     con = connect(settings.norm_dir)
-    cands = con.execute("SELECT * FROM candidates").df()
-    cands = cands[~cands["is_dev_code"]]
+    if args.codes:
+        cands = _codes_candidates(con, v2, args.codes, args.ignore_eligibility)
+        tag = "codes" + ("_noelig" if args.ignore_eligibility else "")
+    else:
+        cands = con.execute("SELECT * FROM candidates").df()
+        cands = cands[~cands["is_dev_code"]]
+        tag = "all"
     print(f"candidates: {len(cands):,}; adding features...")
     feats = add_features(con, cands)
     last = con.execute("SELECT MAX(Date) FROM prices").fetchone()[0]
@@ -362,7 +396,7 @@ def cmd_backtest_v3(args, settings) -> int:
     res = run_sets(sets, pb, days, periods, cfg["sizings"], seeds=args.seeds, c0_cost=v2["c0"]["cost"],
                    hold_days=v2["holding"]["days"], progress=(print if args.verbose else (lambda m: None)))
 
-    out = _derived(settings, "backtest") / ("v3_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+    out = _derived(settings, "backtest") / (f"v3_{tag}_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
     out.mkdir(parents=True, exist_ok=True)
     acc = []
     for key, r in res.items():
@@ -377,7 +411,8 @@ def cmd_backtest_v3(args, settings) -> int:
     acc = pd.DataFrame(acc)
     acc.to_csv(out / "account_summary.csv", index=False)
     cand_tab.to_csv(out / "candidate_sets.csv", index=False)
-    (out / "meta.json").write_text(json.dumps({"v3": cfg, "periods": periods, "seeds": args.seeds}, ensure_ascii=False,
+    (out / "meta.json").write_text(json.dumps({"v3": cfg, "periods": periods, "seeds": args.seeds,
+                                              "codes": args.codes, "ignore_eligibility": args.ignore_eligibility}, ensure_ascii=False,
                                               indent=2, default=str), encoding="utf-8")
 
     def pct(x):
@@ -482,6 +517,8 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("backtest-v3", help="v3 market/risk filters vs v2, two account sizings")
     s.add_argument("--seeds", type=int, default=20)
+    s.add_argument("--codes", help="restrict to these codes, e.g. 3388,8174 (legacy dev codes allowed)")
+    s.add_argument("--ignore-eligibility", action="store_true", help="with --codes: do not require eligibility")
     s.set_defaults(fn=cmd_backtest_v3)
 
     s = sub.add_parser("diagnose", help="bucketed diagnostics of the latest backtest run")
