@@ -6,6 +6,8 @@ import argparse
 import logging
 import sys
 
+import pandas as pd
+
 from .config import api_key_from_env, load_settings
 from .datasets import DATASETS
 from .rawstore import RawStore
@@ -213,6 +215,79 @@ def cmd_candidates(args, settings) -> int:
     return 0
 
 
+def cmd_backtest(args, settings) -> int:
+    from datetime import datetime
+
+    from .backtest import AccountRules, candidate_outcomes, load_pricebook, run_all, save_results, summarize_candidates
+    from .derived import load_strategy
+    from .store import connect
+
+    strategy = load_strategy()
+    con = connect(settings.norm_dir)
+    cands = con.execute("SELECT * FROM candidates").df()
+    if not args.include_dev_codes:
+        cands = cands[~cands["is_dev_code"]]
+    last = con.execute("SELECT MAX(Date) FROM prices").fetchone()[0]
+    days = [r[0] for r in con.execute(
+        "SELECT Date FROM calendar WHERE HolDiv = '1' AND Date >= ? AND Date <= ? ORDER BY Date",
+        [cands["Date"].min(), last]).fetchall()]
+    rules = AccountRules(hold_days=strategy["holding"]["days"])
+    print(f"candidates: {len(cands):,} (c0 pass {int(cands['c0'].sum()):,}); loading prices...")
+    pb = load_pricebook(con, cands["Code"].unique())
+    co = candidate_outcomes(cands, pb, rules)
+    co["year"] = co["Date"].astype(str).str[:4]
+    co["c0_group"] = co["c0_status"].where(co["c0_status"].isin(["pass", "fail"]), "no_c0")
+    cs = pd.concat([
+        summarize_candidates(co, ["c0_group", "period"]).assign(split="period"),
+        summarize_candidates(co, ["c0_group", "chronos_period"]).assign(split="chronos_period"),
+        summarize_candidates(co, ["c0_group", "year"]).assign(split="year"),
+    ])
+    per = strategy["periods"]
+    periods = {
+        "full": (cands["Date"].min(), last),
+        "dev": (cands["Date"].min(), per["dev_until"]),
+        "eval": ("2021-11-01", last),
+        "post_release": (per["chronos_release"], last),
+    }
+    print("running account simulations...")
+    res = run_all(cands, pb, days, periods, rules, seeds=args.seeds, c0_cost=strategy["c0"]["cost"])
+    out = _derived(settings, "backtest") / datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_results(res, co, cs, out, {"strategy": strategy, "periods": periods, "rules": rules.__dict__,
+                                    "include_dev_codes": args.include_dev_codes, "seeds": args.seeds})
+    _print_backtest(res, cs)
+    print(f"saved -> {out}")
+    return 0
+
+
+def _print_backtest(res, cs) -> None:
+    def pct(x):
+        return f"{x * 100:6.1f}%" if pd.notna(x) else "    - "
+
+    print("\n[candidate level] 20-day net return and share with intraday MAE <= -10%")
+    t = cs[cs["split"] == "period"]
+    for _, r in t.iterrows():
+        print(f"  {r['period']:5s} {r['c0_group']:6s} n={int(r['n']):>8,d}  mean {pct(r['mean_net'])}  "
+              f"win {pct(r['win_rate'])}  MAE<=-10% {pct(r['mae10'])}")
+    t = cs[cs["split"] == "chronos_period"]
+    for _, r in t.iterrows():
+        print(f"  {r['chronos_period']:26s} {r['c0_group']:6s} n={int(r['n']):>8,d}  mean {pct(r['mean_net'])}  "
+              f"MAE<=-10% {pct(r['mae10'])}")
+    print("\n[account] cumulative / CAGR / maxDD / invested / trades / win / trades with MAE<=-10%")
+    for key, r in res.items():
+        p, v, k = key.split("|")
+        if "summary" in r:
+            m = r["summary"]
+            print(f"  {p:12s} {v:10s} {k}  {pct(m.get('cumulative'))} {pct(m.get('cagr'))} {pct(m.get('max_dd'))} "
+                  f"{pct(m.get('mean_invested_ratio'))} {m.get('trades', 0):>5d} {pct(m.get('win_rate'))} "
+                  f"{m.get('trade_mae10', 0):>4d}")
+        else:
+            md, lo, hi = r["median"], r["p10"], r["p90"]
+            print(f"  {p:12s} {v:10s} R  {pct(md.get('cumulative'))} {pct(md.get('cagr'))} {pct(md.get('max_dd'))} "
+                  f"{pct(md.get('mean_invested_ratio'))} {int(md.get('trades', 0)):>5d} {pct(md.get('win_rate'))} "
+                  f"{int(md.get('trade_mae10', 0)):>4d}   (random median; cumulative p10..p90 "
+                  f"{pct(lo.get('cumulative'))}..{pct(hi.get('cumulative'))})")
+
+
 def cmd_pipeline(args, settings) -> int:
     """universe -> signals -> forecast -> candidates for a date range."""
     for fn in (cmd_universe, cmd_signals, cmd_forecast, cmd_candidates):
@@ -285,6 +360,11 @@ def main(argv: list[str] | None = None) -> int:
         s.add_argument("--to", dest="date_to", help="default: today")
         s.add_argument("--limit", type=int, help="forecast: stop after N new forecasts (testing)")
         s.set_defaults(fn=fn)
+
+    s = sub.add_parser("backtest", help="candidate-level outcomes and account simulations")
+    s.add_argument("--seeds", type=int, default=20, help="random-ranking repetitions")
+    s.add_argument("--include-dev-codes", action="store_true", help="keep the 8 legacy development stocks")
+    s.set_defaults(fn=cmd_backtest)
 
     s = sub.add_parser("roster", help="freeze a fixed-seed stratified sample of eligible companies")
     s.add_argument("--name", required=True, help="file name under rosters/ (never overwritten)")
