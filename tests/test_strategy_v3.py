@@ -49,3 +49,12 @@ def test_quality_features_point_in_time():
     assert q.loc["2023-06-02", "op_pos_streak"] == 0  # correction known after 06-01
     assert np.isclose(q.loc["2023-05-11", "sales_cagr3"], 0.1)
     assert np.isclose(q.loc["2023-05-11", "roe"], 0.1)
+
+
+def test_v4_quality_filter():
+    from akiyama.strategy_v4 import quality_ok
+
+    cfg4 = yaml.safe_load((REPO_ROOT / "config" / "strategy_v4.yaml").read_text(encoding="utf-8"))
+    df = pd.DataFrame({"op_pos_streak": [3, 2, 5, 5], "roe_avg3": [0.08, 0.2, 0.05, 0.1],
+                       "eq_ratio": [0.5, 0.6, 0.6, 0.6], "div_payer": [1.0, 1.0, 1.0, np.nan]})
+    assert quality_ok(df, cfg4).tolist() == [True, False, False, False]

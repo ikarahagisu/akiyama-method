@@ -345,7 +345,12 @@ def _codes_candidates(con, strategy: dict, codes_arg: str, ignore_eligibility: b
     return df
 
 
-def cmd_backtest_v3(args, settings) -> int:
+def cmd_backtest_v4(args, settings) -> int:
+    args.codes, args.ignore_eligibility = None, False
+    return cmd_backtest_v3(args, settings, version="v4")
+
+
+def cmd_backtest_v3(args, settings, version: str = "v3") -> int:
     import json
     from datetime import datetime
 
@@ -376,7 +381,25 @@ def cmd_backtest_v3(args, settings) -> int:
         [feats["Date"].min(), last]).fetchall()]
     pb = load_pricebook(con, feats["Code"].unique())
     co = candidate_outcomes(feats, pb, AccountRules(hold_days=v2["holding"]["days"]))
-    sets = candidate_sets(co, cfg)
+    if version == "v4":
+        from . import strategy_v4
+        from .quality import quality_features
+
+        cfg4 = yaml.safe_load((REPO_ROOT / "config" / "strategy_v4.yaml").read_text(encoding="utf-8"))
+        qpath = _derived(settings, "quality") / "quality_features.parquet"
+        keys = co[["Code", "Date"]].astype(str)
+        qf = pd.read_parquet(qpath) if qpath.exists() else None
+        if qf is None or len(keys.merge(qf[["Code", "Date"]].astype(str), how="left", indicator=True)
+                             .query("_merge == 'left_only'")):
+            print("computing quality features ...")
+            qf = quality_features(con, keys)
+        co = co.assign(Code=co["Code"].astype(str), Date=co["Date"].astype(str)).merge(
+            qf.assign(Code=qf["Code"].astype(str), Date=qf["Date"].astype(str)), on=["Code", "Date"], how="left")
+        sets = strategy_v4.candidate_sets(co, cfg, cfg4)
+        tag = "v4"
+    else:
+        sets = candidate_sets(co, cfg)
+        tag = f"v3_{tag}"
 
     # candidate level per set
     rows = []
@@ -396,7 +419,7 @@ def cmd_backtest_v3(args, settings) -> int:
     res = run_sets(sets, pb, days, periods, cfg["sizings"], seeds=args.seeds, c0_cost=v2["c0"]["cost"],
                    hold_days=v2["holding"]["days"], progress=(print if args.verbose else (lambda m: None)))
 
-    out = _derived(settings, "backtest") / (f"v3_{tag}_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+    out = _derived(settings, "backtest") / (f"{tag}_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
     out.mkdir(parents=True, exist_ok=True)
     acc = []
     for key, r in res.items():
@@ -568,6 +591,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--codes", help="restrict to these codes, e.g. 3388,8174 (legacy dev codes allowed)")
     s.add_argument("--ignore-eligibility", action="store_true", help="with --codes: do not require eligibility")
     s.set_defaults(fn=cmd_backtest_v3)
+
+    s = sub.add_parser("backtest-v4", help="v4 company-quality filter vs v2/v3 (evaluate once)")
+    s.add_argument("--seeds", type=int, default=20)
+    s.set_defaults(fn=cmd_backtest_v4)
 
     s = sub.add_parser("quality-profile", help="quality features: legacy 8 vs universe, dev-period buckets")
     s.set_defaults(fn=cmd_quality_profile)

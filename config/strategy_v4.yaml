@@ -1,0 +1,12 @@
+# chronos_v4: company-quality filter (fixed 2026-11-15 before any evaluation-period
+# result for these features was seen). Thresholds = what all 8 legacy stocks satisfy,
+# chosen for economic meaning, not tuned on outcomes (dev evidence for profit-history
+# features is confounded with time because data starts in 2016-11).
+# Evaluate ONCE on the evaluation period (2021-11 onward), legacy 8 excluded.
+name: chronos_v4
+version: 1
+quality:
+  op_pos_streak_min: 3   # operating profit > 0 in each of the last 3 fiscal years
+  roe_avg3_min: 0.07     # 3-year average ROE >= 7%
+  eq_ratio_min: 0.45     # equity-to-asset ratio >= 45%
+  dividend: true         # latest annual dividend > 0
