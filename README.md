@@ -98,6 +98,16 @@ python -m akiyama status
 
 想定時刻は `config/settings.yaml` の `availability` で変更できる。保守的（遅め）に置いている。
 
+## 追加データ（2026-11-14）
+
+| データ | 内容 | available_at |
+|---|---|---|
+| valuation | 日次のEPS・予想EPS・BPS・ROE・PER・予想PER・PBR・時価総額 | 当日16:30（仮定） |
+| short_sale_report | 空売り残高報告（発行済株式の0.5%以上）。報告者・残高割合・前回割合 | 公表日23:59（仮定） |
+| margin_alert | 日々公表銘柄・信用規制・注意喚起などの状況と信用残 | 公表日23:59（仮定） |
+
+数値と記号（`*`など）が混在する列は文字列のまま保存する。
+
 ## プランで取れないもの（Standard）
 
 財務詳細（`/fins/details`）、配当（`/fins/dividend`）、売買内訳（`/markets/breakdown`）はPremium限定。

@@ -98,6 +98,16 @@ def _read_csv(path: Path, ds: Dataset) -> pd.DataFrame:
     return pd.read_csv(path, dtype=dtype, keep_default_na=True, low_memory=False)
 
 
+def _fix_mixed(df: pd.DataFrame) -> pd.DataFrame:
+    """Columns mixing numbers and markers like '*' or '-' are stored as text (never coerced)."""
+    for c in df.columns:
+        if df[c].dtype == object:
+            kinds = {type(v) for v in df[c].dropna().head(200000)}
+            if len(kinds) > 1:
+                df[c] = df[c].map(lambda v: v if pd.isna(v) else str(v)).astype("string")
+    return df
+
+
 def _partition(period: str) -> str:
     return period[:4] if period else "all"
 
@@ -143,7 +153,7 @@ def normalize_bulk(store: RawStore, norm_dir: Path, name: str, settings_avail: d
             df["src_key"], df["src_version"] = key, e.version
             frames.append(df)
         df = pd.concat(frames, ignore_index=True)
-        df = df.drop_duplicates(subset=list(ds.key_cols), keep="last")
+        df = _fix_mixed(df.drop_duplicates(subset=list(ds.key_cols), keep="last"))
         df = add_availability(df, ds.avail, settings_avail, tdays)
         _write(df, norm_dir / name, part)
         rows += len(df)

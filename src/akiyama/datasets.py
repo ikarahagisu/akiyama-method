@@ -106,6 +106,20 @@ DATASETS: dict[str, Dataset] = {
             (),
         ),
         Dataset(
+            "short_sale_report",
+            "/markets/short-sale-report",
+            ("DiscDate", "CalcDate", "Code", "SSName", "DICName", "FundName"),
+            Avail("day_time", "DiscDate", time_setting="pub_date_time"),
+            ("Code", "SSName", "SSAddr", "DICName", "DICAddr", "FundName", "Notes"),
+        ),
+        Dataset(
+            "margin_alert",
+            "/markets/margin-alert",
+            ("PubDate", "Code", "AppDate"),
+            Avail("day_time", "PubDate", time_setting="pub_date_time"),
+            ("Code", "PubReason", "ShrtOutRatio", "LongOutRatio", "TSEMrgnRegCls"),
+        ),
+        Dataset(
             "valuation",
             "/equities/valuation",
             ("Date", "Code"),

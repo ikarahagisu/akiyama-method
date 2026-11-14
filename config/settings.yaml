@@ -19,6 +19,9 @@ default_datasets:
   - margin_interest
   - short_ratio
   - investor_types
+  - valuation          # PER/PBR/EPS etc. (~250 MB)
+  - short_sale_report  # large short positions (>=0.5%) reports
+  - margin_alert       # margin trading alerts / restrictions
 
 # Assumed availability times (JST) for data whose source has no publish time.
 # These are deliberately conservative; every row records which basis was used.
