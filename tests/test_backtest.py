@@ -83,3 +83,13 @@ def test_delisted_position_closed_at_last_close():
 def test_rank_a_uses_margin_over_threshold():
     day = pd.DataFrame({"Code": ["X", "Y"], "r_hat": [0.05, 0.04], "ref_p": [0.045, 0.0], "c0_cost": 0.002, "ret60": -0.1})
     assert rank_candidates(day, "A", np.random.default_rng(0))["Code"].tolist() == ["Y", "X"]
+
+
+def test_ai_reviewer_removal_rates():
+    from akiyama.ai_sensitivity import apply_reviewer
+
+    c = pd.DataFrame({"mae_low": [-0.2] * 1000 + [0.0] * 1000})
+    assert len(apply_reviewer(c, 1.0, 0.0)) == 1000
+    assert len(apply_reviewer(c, 0.0, 0.0)) == 2000
+    kept = apply_reviewer(c, 0.5, 0.1)
+    assert 400 < (kept["mae_low"] < -0.1).sum() < 600 and 850 < (kept["mae_low"] == 0).sum() < 950

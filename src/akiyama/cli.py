@@ -463,6 +463,79 @@ def cmd_backtest_v3(args, settings, version: str = "v3") -> int:
 LEGACY8 = "3388,3923,6161,6941,7453,7545,7564,8174"
 
 
+def _v4_outcomes(con, settings):
+    """Candidates (legacy 8 excluded) with outcomes, market/risk and quality features."""
+    from .backtest import AccountRules, candidate_outcomes, load_pricebook
+    from .derived import load_strategy
+    from .diagnose import add_features
+    from .quality import quality_features
+
+    v2 = load_strategy()
+    cands = con.execute("SELECT * FROM candidates").df()
+    cands = cands[~cands["is_dev_code"]]
+    feats = add_features(con, cands)
+    pb = load_pricebook(con, feats["Code"].unique())
+    co = candidate_outcomes(feats, pb, AccountRules(hold_days=v2["holding"]["days"]))
+    qpath = _derived(settings, "quality") / "quality_features.parquet"
+    qf = pd.read_parquet(qpath) if qpath.exists() else quality_features(con, co[["Code", "Date"]])
+    co = co.assign(Code=co["Code"].astype(str), Date=co["Date"].astype(str)).merge(
+        qf.assign(Code=qf["Code"].astype(str), Date=qf["Date"].astype(str)), on=["Code", "Date"], how="left")
+    return co, pb, v2
+
+
+def cmd_ai_sensitivity(args, settings) -> int:
+    from datetime import datetime
+
+    import yaml
+
+    from . import strategy_v4
+    from .ai_sensitivity import DETECT, FALSE_REMOVE, grid_sets
+    from .backtest import run_sets
+    from .config import REPO_ROOT
+    from .store import connect
+
+    con = connect(settings.norm_dir)
+    print("loading candidates and features ...")
+    co, pb, v2 = _v4_outcomes(con, settings)
+    cfg3 = yaml.safe_load((REPO_ROOT / "config" / "strategy_v3.yaml").read_text(encoding="utf-8"))
+    cfg4 = yaml.safe_load((REPO_ROOT / "config" / "strategy_v4.yaml").read_text(encoding="utf-8"))
+    base = strategy_v4.candidate_sets(co, cfg3, cfg4)
+    base = {k: base[k][0] for k in ("v2_price", "v4q_quality", "v4qm_quality_market")}
+    sets = grid_sets(base)
+    last = con.execute("SELECT MAX(Date) FROM prices").fetchone()[0]
+    first = co["Date"].min()
+    days = [r[0] for r in con.execute("SELECT Date FROM calendar WHERE HolDiv = '1' AND Date >= ? AND Date <= ? ORDER BY Date",
+                                      [first, last]).fetchall()]
+    periods = {"full": (first, last), "eval": ("2021-11-01", last)}
+    sizing = [{"name": "10x30", "slots": 10, "max_per_position": 300_000}]
+    print(f"running {len(sets)} reviewer scenarios x {len(periods)} periods x {args.seeds} seeds ...")
+    res = run_sets(sets, pb, days, periods, sizing, seeds=args.seeds, c0_cost=v2["c0"]["cost"],
+                   hold_days=v2["holding"]["days"], progress=(print if args.verbose else (lambda m: None)))
+    rows = []
+    for key, r in res.items():
+        p, sname, _ = key.split("|")
+        base_name, d, f = sname.split("@")[0].split("~")
+        rows.append({"period": p, "set": base_name, "detect": float(d[1:]), "false_remove": float(f[1:]), **r["median"]})
+    tab = pd.DataFrame(rows)
+    bench = {k: _topix_stats(con, lo, hi) for k, (lo, hi) in periods.items()}
+    out = _derived(settings, "backtest") / ("ai_sensitivity_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+    out.mkdir(parents=True, exist_ok=True)
+    tab.to_csv(out / "ai_sensitivity.csv", index=False)
+    pd.set_option("display.width", 200)
+    for (p, sname), g in tab.groupby(["period", "set"], sort=False):
+        b = bench.get(p, {})
+        print(f"\n== {p} / {sname}   (TOPIX buy & hold: {b.get('cumulative', float('nan')) * 100:.0f}%, "
+              f"maxDD {b.get('max_dd', float('nan')) * 100:.0f}%)")
+        print("   cumulative (median of seeds); rows = share of crash candidates removed, cols = share of others removed")
+        piv = g.pivot_table(index="detect", columns="false_remove", values="cumulative") * 100
+        print(piv.round(1).to_string())
+        piv = g.pivot_table(index="detect", columns="false_remove", values="max_dd") * 100
+        print("   max drawdown")
+        print(piv.round(1).to_string())
+    print(f"\nsaved -> {out}")
+    return 0
+
+
 def _topix_stats(con, lo: str, hi: str) -> dict:
     import numpy as np
 
@@ -687,6 +760,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--max-days", type=int, default=20)
     s.add_argument("--seeds", type=int, default=20)
     s.set_defaults(fn=cmd_backtest_gc_rsi)
+
+    s = sub.add_parser("ai-sensitivity", help="how accurate must an AI review be to beat the index? (no API)")
+    s.add_argument("--seeds", type=int, default=5)
+    s.set_defaults(fn=cmd_ai_sensitivity)
 
     s = sub.add_parser("quality-profile", help="quality features: legacy 8 vs universe, dev-period buckets")
     s.set_defaults(fn=cmd_quality_profile)
